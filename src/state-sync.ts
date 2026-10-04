@@ -303,6 +303,22 @@ export class ReplicatedState {
   }
 }
 
+/**
+ * Result payload returned by the `state-delta` handler.
+ *
+ * `delta` is a well-formed `StateDelta` describing everything the receiver is
+ * missing, so it can be forwarded to `applyDelta` unchanged. `applied` is
+ * reported separately rather than merged into the delta, which would otherwise
+ * produce an object that only satisfies `StateDelta` by accident of the
+ * permissive wire validator.
+ */
+export type StateSyncResult = {
+  namespace: string;
+  clock: VectorClock;
+  applied: number;
+  delta?: StateDelta;
+};
+
 export function registerStateSyncHandlers(
   node: A2ANode,
   state: ReplicatedState,
@@ -316,9 +332,11 @@ export function registerStateSyncHandlers(
       return {
         kind: "state-delta",
         payload: {
-          ...state.createDelta(delta.clock),
+          namespace: state.namespace,
+          clock: state.snapshot().clock,
           applied,
-        },
+          delta: state.createDelta(delta.clock),
+        } satisfies StateSyncResult,
       };
     },
     { requiredScopes: [requiredScope] },
@@ -334,7 +352,7 @@ export function registerStateSyncHandlers(
           namespace: state.namespace,
           clock: state.snapshot().clock,
           applied,
-        },
+        } satisfies StateSyncResult,
       };
     },
     { requiredScopes: [requiredScope] },

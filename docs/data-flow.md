@@ -727,6 +727,24 @@ Beta 的 `registerStateSyncHandlers()`：
 3. 根据 `delta.clock` 创建 Beta 侧缺失内容。
 4. 在 response 中返回反向 delta 和 `applied` 数量。
 
+响应 payload 形状为 `StateSyncResult`，反向 delta 放在 `delta` 字段，`applied` 和 `clock` 与它并列：
+
+```json
+{
+  "namespace": "workflow",
+  "clock": { "agent://beta": 3, "agent://alpha": 1 },
+  "applied": 2,
+  "delta": {
+    "namespace": "workflow",
+    "baseClock": { "agent://alpha": 1 },
+    "clock": { "agent://beta": 3, "agent://alpha": 1 },
+    "changes": []
+  }
+}
+```
+
+`delta` 是结构完整的 `StateDelta`，可以直接交给 `applyDelta()`；不要把整个响应当成 `StateDelta` 传入。
+
 ```mermaid
 sequenceDiagram
   participant A as Alpha State

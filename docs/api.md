@@ -257,6 +257,19 @@ state.applySnapshot(remoteSnapshot);
 
 注册 `state-delta` 和 `state-snapshot` 处理器。默认 scope 为 `state:sync`，返回的注销函数会同时移除两个处理器。
 
+两个处理器的响应 payload 都是 `StateSyncResult`：
+
+```ts
+interface StateSyncResult {
+  namespace: string;
+  clock: VectorClock;
+  applied: number;
+  delta?: StateDelta; // 仅 state-delta 处理器返回
+}
+```
+
+`delta` 是对端缺失内容的完整 `StateDelta`，可直接交给 `applyDelta()`。它与 `applied`、`clock` 分开存放，而不是把计数混入 delta，因此整个 payload 不会只因为校验器宽松才凑巧满足 `StateDelta`。`state-snapshot` 处理器只返回计数器，接收方需自行用 `createDelta()` 拉取差异。
+
 ### 向量时钟工具
 
 - `compareVectorClocks(left, right)`：返回 `before | after | equal | concurrent`。

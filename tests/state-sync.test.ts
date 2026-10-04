@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  A2AClient,
+  A2ANode,
+  InMemoryTransport,
+  PeerRegistry,
   ReplicatedState,
   compareVectorClocks,
+  generateSigningIdentity,
   mergeVectorClocks,
+  registerStateSyncHandlers,
+  type StateDelta,
+  type StateSyncResult,
 } from "../src/index.js";
 
 test("vector clocks distinguish causal and concurrent updates", () => {
@@ -35,6 +43,58 @@ test("concurrent state changes converge deterministically", () => {
   assert.equal(alpha.get("status"), "from-beta");
   assert.equal(beta.get("status"), "from-beta");
   assert.deepEqual(alpha.snapshot(), beta.snapshot());
+});
+
+test("the state-delta reply carries a reusable delta beside its counters", async () => {
+  const serverIdentity = generateSigningIdentity("agent://coordinator");
+  const clientIdentity = generateSigningIdentity("agent://worker");
+  const peers = new PeerRegistry();
+  peers.register({
+    agentId: clientIdentity.agentId,
+    keyId: clientIdentity.keyId,
+    publicKey: clientIdentity.publicKey,
+    grantedScopes: ["state:sync"],
+  });
+  const node = new A2ANode({
+    identity: serverIdentity,
+    peers,
+    name: "Coordinator",
+    endpoint: "http://127.0.0.1:4310",
+  });
+  const state = new ReplicatedState("agent://coordinator", "workflow");
+  registerStateSyncHandlers(node, state);
+  state.set("step", 1);
+
+  const client = new A2AClient({
+    identity: clientIdentity,
+    transport: new InMemoryTransport(node),
+    requestedScopes: ["state:sync"],
+  });
+  const delivery = await client.send({
+    kind: "state-delta",
+    recipient: serverIdentity.agentId,
+    payload: { namespace: "workflow", baseClock: {}, clock: {}, changes: [] },
+  });
+
+  const result = delivery.messages[0]?.payload as StateSyncResult;
+  assert.equal(result.namespace, "workflow");
+  assert.equal(result.applied, 0);
+  assert.equal(typeof result.clock["agent://coordinator"], "number");
+
+  // The nested delta must be a self-contained StateDelta that can be applied
+  // directly, rather than the whole reply being shaped like one by accident.
+  const delta = result.delta as StateDelta;
+  assert.equal(delta.namespace, "workflow");
+  assert.deepEqual(Object.keys(delta).sort(), [
+    "baseClock",
+    "changes",
+    "clock",
+    "namespace",
+  ]);
+
+  const receiver = new ReplicatedState("agent://worker", "workflow");
+  receiver.applyDelta(delta);
+  assert.equal(receiver.get("step"), 1);
 });
 
 test("causally newer updates and tombstones propagate as deltas", () => {
