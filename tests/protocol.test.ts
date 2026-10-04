@@ -13,6 +13,7 @@ import {
   generateSigningIdentity,
   signChallenge,
   type A2AMessage,
+  type AckPayload,
   type AgentCard,
   type Challenge,
   type ChallengeRequest,
@@ -20,6 +21,7 @@ import {
   type ClientTransport,
   type DeliveryBundle,
   type SessionGrant,
+  type SigningIdentity,
 } from "../src/index.js";
 
 function createFixture(grantedScopes = ["tasks:execute"]) {
@@ -262,6 +264,161 @@ test("HTTP binding completes discovery, authentication, and delivery", async () 
     });
   }
 });
+
+test("a single 401 does not consume the retry budget", async () => {
+  const { clientIdentity, node } = createFixture();
+  node.registerHandler("request", () => ({ payload: { ok: true } }));
+  const inner = new InMemoryTransport(node);
+  let unauthorized = true;
+  const transport = new Single401Transport(inner, () => {
+    if (!unauthorized) {
+      return false;
+    }
+    unauthorized = false;
+    return true;
+  });
+  const client = new A2AClient({
+    identity: clientIdentity,
+    transport,
+    requestedScopes: ["tasks:execute"],
+    retryPolicy: { maxAttempts: 1, initialDelayMs: 1, jitterRatio: 0 },
+  });
+
+  const delivery = await client.send({
+    kind: "request",
+    recipient: node.identity.agentId,
+    payload: { task: "single-attempt" },
+  });
+
+  assert.equal(delivery.ack.payload.status, "completed");
+  assert.equal(transport.sendCount, 2);
+});
+
+test("a persistent 401 surfaces after a single re-authentication", async () => {
+  const { clientIdentity, node } = createFixture();
+  node.registerHandler("request", () => ({ payload: { ok: true } }));
+  const inner = new InMemoryTransport(node);
+  const transport = new Single401Transport(inner, () => true);
+  const client = new A2AClient({
+    identity: clientIdentity,
+    transport,
+    requestedScopes: ["tasks:execute"],
+    retryPolicy: { maxAttempts: 3, initialDelayMs: 1, jitterRatio: 0 },
+  });
+
+  await assert.rejects(
+    () =>
+      client.send({
+        kind: "request",
+        recipient: node.identity.agentId,
+        payload: { task: "always-401" },
+      }),
+    (error: unknown) => error instanceof A2AError && error.status === 401,
+  );
+  assert.equal(transport.sendCount, 2);
+});
+
+test("a malformed acknowledgement yields a protocol error, not a TypeError", async () => {
+  const { clientIdentity, node, serverIdentity } = createFixture();
+  node.registerHandler("request", () => ({ payload: { ok: true } }));
+  const inner = new InMemoryTransport(node);
+  const client = new A2AClient({
+    identity: clientIdentity,
+    transport: new HostileAckTransport(inner, serverIdentity),
+    requestedScopes: ["tasks:execute"],
+  });
+
+  await assert.rejects(
+    () =>
+      client.send({
+        kind: "request",
+        recipient: serverIdentity.agentId,
+        payload: { task: "hostile-ack" },
+      }),
+    (error: unknown) =>
+      error instanceof A2AError &&
+      error.code === ErrorCode.InvalidMessage &&
+      !(error instanceof TypeError),
+  );
+});
+
+class Single401Transport implements ClientTransport {
+  sendCount = 0;
+
+  constructor(
+    private readonly inner: ClientTransport,
+    private readonly shouldReject: () => boolean,
+  ) {}
+
+  discover(): Promise<AgentCard> {
+    return this.inner.discover();
+  }
+
+  requestChallenge(request: ChallengeRequest): Promise<Challenge> {
+    return this.inner.requestChallenge(request);
+  }
+
+  verifyChallenge(
+    verification: ChallengeVerification,
+  ): Promise<SessionGrant> {
+    return this.inner.verifyChallenge(verification);
+  }
+
+  async send(
+    message: A2AMessage,
+    bearerToken: string,
+  ): Promise<DeliveryBundle> {
+    this.sendCount += 1;
+    if (this.shouldReject()) {
+      throw new A2AError(
+        ErrorCode.AuthenticationRequired,
+        "Simulated expired session",
+        { status: 401 },
+      );
+    }
+    return this.inner.send(message, bearerToken);
+  }
+}
+
+class HostileAckTransport implements ClientTransport {
+  constructor(
+    private readonly inner: ClientTransport,
+    private readonly serverIdentity: SigningIdentity,
+  ) {}
+
+  discover(): Promise<AgentCard> {
+    return this.inner.discover();
+  }
+
+  requestChallenge(request: ChallengeRequest): Promise<Challenge> {
+    return this.inner.requestChallenge(request);
+  }
+
+  verifyChallenge(
+    verification: ChallengeVerification,
+  ): Promise<SessionGrant> {
+    return this.inner.verifyChallenge(verification);
+  }
+
+  async send(
+    message: A2AMessage,
+    bearerToken: string,
+  ): Promise<DeliveryBundle> {
+    await this.inner.send(message, bearerToken);
+    // Re-signs a null payload with the trusted server key, so the signature
+    // check passes and only the acknowledgement shape is invalid.
+    return {
+      ack: createSignedMessage(this.serverIdentity, {
+        kind: "ack",
+        recipient: message.sender,
+        payload: null as unknown as AckPayload,
+        correlationId: message.id,
+        conversationId: "hostile",
+      }),
+      messages: [],
+    };
+  }
+}
 
 class LoseFirstResponseTransport implements ClientTransport {
   sendCount = 0;

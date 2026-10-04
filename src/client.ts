@@ -8,6 +8,7 @@ import {
 import { A2AError, ErrorCode } from "./errors.js";
 import type {
   A2AMessage,
+  AckStatus,
   AgentCard,
   ClientTransport,
   DeliveryBundle,
@@ -24,6 +25,13 @@ import {
   assertSessionGrant,
   assertValidMessage,
 } from "./validation.js";
+
+const ACK_STATUSES = new Set<string>([
+  "accepted",
+  "completed",
+  "rejected",
+  "duplicate",
+] satisfies AckStatus[]);
 
 const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxAttempts: 4,
@@ -152,10 +160,12 @@ export class A2AClient {
 
     let lastError: unknown;
     let refreshedSession = false;
-    for (let attempt = 1; attempt <= policy.maxAttempts; attempt += 1) {
+    let attempt = 0;
+    while (attempt < policy.maxAttempts) {
       if (options.signal?.aborted) {
         throw options.signal.reason;
       }
+      attempt += 1;
       try {
         const grant = await this.ensureSession();
         const bundle = await this.transport.send(message, grant.token);
@@ -194,9 +204,13 @@ export class A2AClient {
           error.status === 401 &&
           !refreshedSession
         ) {
+          // Re-authentication is not a delivery attempt, so it must not
+          // consume the retry budget. The protocol guarantees exactly one
+          // refresh; a second 401 falls through and is surfaced.
           this.grant = undefined;
           this.grant = await this.authenticate();
           refreshedSession = true;
+          attempt -= 1;
           continue;
         }
         if (
@@ -296,6 +310,7 @@ export class A2AClient {
     sent: A2AMessage,
     bundle: DeliveryBundle,
   ): void {
+    this.assertDeliveryShape(bundle);
     const allMessages: A2AMessage[] = [bundle.ack, ...bundle.messages];
     for (const message of allMessages) {
       const limits = this.card
@@ -334,6 +349,37 @@ export class A2AClient {
         "Delivery acknowledgement does not match the sent message",
         { status: 502 },
       );
+    }
+  }
+
+  /**
+   * `DeliveryBundle` is untrusted remote input. The acknowledgement payload
+   * is read as a typed object by both `verifyDelivery` and the retry loop, so
+   * a malformed envelope must fail with a protocol error instead of a
+   * `TypeError` from property access on `null`.
+   */
+  private assertDeliveryShape(bundle: DeliveryBundle): void {
+    const invalid = new A2AError(
+      ErrorCode.InvalidMessage,
+      "Delivery bundle is malformed",
+      { status: 502 },
+    );
+    if (
+      bundle === null ||
+      typeof bundle !== "object" ||
+      !Array.isArray(bundle.messages)
+    ) {
+      throw invalid;
+    }
+    const payload = bundle.ack?.payload;
+    if (
+      payload === null ||
+      typeof payload !== "object" ||
+      typeof payload.messageId !== "string" ||
+      typeof payload.status !== "string" ||
+      !ACK_STATUSES.has(payload.status)
+    ) {
+      throw invalid;
     }
   }
 
