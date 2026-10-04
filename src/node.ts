@@ -1,4 +1,9 @@
-import { SessionManager, requireScopes, type SessionManagerOptions } from "./auth.js";
+import {
+  PeerRegistry,
+  SessionManager,
+  requireScopes,
+  type SessionManagerOptions,
+} from "./auth.js";
 import {
   createSignedMessage,
   exportPublicKeyPem,
@@ -23,7 +28,7 @@ import type {
   SigningIdentity,
 } from "./types.js";
 import { assertValidMessage } from "./validation.js";
-import { PeerRegistry } from "./auth.js";
+import { PROTOCOL_VERSION } from "./types.js";
 
 interface HandlerRegistration {
   handler: MessageHandler;
@@ -47,6 +52,10 @@ export interface A2ANodeOptions {
   maxMessageBytes?: number;
   maxTtlMs?: number;
   allowedClockSkewMs?: number;
+  /** Upper bound on cached delivery bundles retained for deduplication. */
+  maxProcessedMessages?: number;
+  /** Upper bound on conversations tracked for per-conversation sequencing. */
+  maxTrackedConversations?: number;
   extensions?: AgentCard["extensions"];
   session?: SessionManagerOptions;
   now?: () => number;
@@ -68,6 +77,8 @@ export class A2ANode {
   private readonly maxMessageBytes: number;
   private readonly maxTtlMs: number;
   private readonly allowedClockSkewMs: number;
+  private readonly maxProcessedMessages: number;
+  private readonly maxTrackedConversations: number;
   private readonly card: AgentCard;
 
   constructor(options: A2ANodeOptions) {
@@ -77,6 +88,8 @@ export class A2ANode {
     this.maxMessageBytes = options.maxMessageBytes ?? 1_048_576;
     this.maxTtlMs = options.maxTtlMs ?? 300_000;
     this.allowedClockSkewMs = options.allowedClockSkewMs ?? 30_000;
+    this.maxProcessedMessages = options.maxProcessedMessages ?? 10_000;
+    this.maxTrackedConversations = options.maxTrackedConversations ?? 10_000;
     this.sessions = new SessionManager(
       this.identity,
       this.peers,
@@ -86,7 +99,7 @@ export class A2ANode {
     this.card = {
       agentId: this.identity.agentId,
       name: options.name,
-      protocolVersions: ["1.0"],
+      protocolVersions: [PROTOCOL_VERSION],
       endpoint: options.endpoint,
       transports: options.transports ?? [
         options.endpoint.startsWith("https:") ? "https" : "http",
@@ -246,8 +259,25 @@ export class A2ANode {
 
     const expiresAt =
       Date.parse(message.createdAt) + message.ttlMs + this.allowedClockSkewMs;
-    this.processed.set(cacheKey, { bundle, expiresAt });
+    this.rememberDelivery(cacheKey, { bundle, expiresAt });
     return bundle;
+  }
+
+  /**
+   * Stores a delivery bundle and evicts the oldest entries once the cache
+   * exceeds `maxProcessedMessages`. Entries already carry an expiry derived
+   * from the message TTL, so this bound only limits peak retention under
+   * sustained load; it never extends a message's deduplication window.
+   */
+  private rememberDelivery(key: string, delivery: CachedDelivery): void {
+    this.processed.set(key, delivery);
+    while (this.processed.size > this.maxProcessedMessages) {
+      const oldest = this.processed.keys().next();
+      if (oldest.done) {
+        return;
+      }
+      this.processed.delete(oldest.value);
+    }
   }
 
   private assertFresh(message: A2AMessage): void {
@@ -328,6 +358,15 @@ export class A2ANode {
   }
 
   private nextSequence(conversationId: string): number {
+    if (
+      !this.sequenceByConversation.has(conversationId) &&
+      this.sequenceByConversation.size >= this.maxTrackedConversations
+    ) {
+      const oldest = this.sequenceByConversation.keys().next();
+      if (!oldest.done) {
+        this.sequenceByConversation.delete(oldest.value);
+      }
+    }
     const next = (this.sequenceByConversation.get(conversationId) ?? -1) + 1;
     this.sequenceByConversation.set(conversationId, next);
     return next;

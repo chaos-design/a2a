@@ -6,6 +6,7 @@ import {
   verifyServerChallengeSignature,
 } from "./crypto.js";
 import { A2AError, ErrorCode } from "./errors.js";
+import { PROTOCOL_VERSION } from "./types.js";
 import type {
   A2AMessage,
   AckStatus,
@@ -99,10 +100,10 @@ export class A2AClient {
         { status: 401 },
       );
     }
-    if (!card.protocolVersions.includes("1.0")) {
+    if (!card.protocolVersions.includes(PROTOCOL_VERSION)) {
       throw new A2AError(
         ErrorCode.UnsupportedVersion,
-        "Remote agent does not advertise A2A/1.0",
+        `Remote agent does not advertise A2A/${PROTOCOL_VERSION}`,
         { status: 400 },
       );
     }

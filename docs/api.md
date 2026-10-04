@@ -119,12 +119,16 @@ const node = new A2ANode({
   maxMessageBytes: 1_048_576,
   maxTtlMs: 300_000,
   allowedClockSkewMs: 30_000,
+  maxProcessedMessages: 10_000,
+  maxTrackedConversations: 10_000,
   session: {
     challengeTtlMs: 30_000,
     sessionTtlMs: 900_000,
   },
 });
 ```
+
+`maxProcessedMessages` 限制去重结果缓存的条目数，`maxTrackedConversations` 限制按会话追踪序号的会话数。超出后按插入顺序淘汰最旧条目。淘汰只会缩短保留窗口，不会延长消息的去重有效期；需要跨重启或跨副本保证效果一次时仍应使用持久 inbox。
 
 ### `registerHandler(kind, handler, options?)`
 

@@ -342,6 +342,43 @@ test("a malformed acknowledgement yields a protocol error, not a TypeError", asy
   );
 });
 
+test("delivery and conversation caches stay within their configured bounds", async () => {
+  const { clientIdentity, node } = createFixture();
+  node.registerHandler("request", () => ({ payload: { ok: true } }));
+  const bounded = new A2ANode({
+    identity: node.identity,
+    peers: node.peers,
+    name: "Coordinator",
+    endpoint: "http://127.0.0.1:4310",
+    maxProcessedMessages: 4,
+    maxTrackedConversations: 4,
+  });
+  bounded.registerHandler("request", () => ({ payload: { ok: true } }), {
+    requiredScopes: ["tasks:execute"],
+  });
+  const client = new A2AClient({
+    identity: clientIdentity,
+    transport: new InMemoryTransport(bounded),
+    requestedScopes: ["tasks:execute"],
+  });
+
+  for (let index = 0; index < 50; index += 1) {
+    await client.send({
+      kind: "request",
+      recipient: bounded.identity.agentId,
+      conversationId: `conversation-${index}`,
+      payload: { index },
+    });
+  }
+
+  const internals = bounded as unknown as {
+    processed: Map<string, unknown>;
+    sequenceByConversation: Map<string, number>;
+  };
+  assert.equal(internals.processed.size, 4);
+  assert.equal(internals.sequenceByConversation.size, 4);
+});
+
 class Single401Transport implements ClientTransport {
   sendCount = 0;
 

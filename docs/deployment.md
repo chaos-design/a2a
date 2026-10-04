@@ -277,7 +277,23 @@ pending challenges: 10,000
 active sessions:    10,000
 ```
 
-这些上限当前通过 `SessionManagerOptions` 配置，不在 `.env` 中暴露。`AgentProvider` 创建节点时只传入 challenge TTL 和 Session TTL；如需调整容量，应直接构造 `A2ANode` 或扩展 Provider 配置。
+`A2ANode` 的两个内存表同样有上限，超出后按插入顺序淘汰最旧条目：
+
+```text
+delivery results:        maxProcessedMessages      = 10,000
+tracked conversations:   maxTrackedConversations  = 10,000
+```
+
+容量估算：
+
+```text
+delivery cache  entries ≈ throughput(msg/s) x (maxTtlMs + allowedClockSkewMs) / 1000
+conversation map entries ≈ 同时活跃的会话数
+```
+
+如果估算值超过默认上限，去重保留窗口会在压力下被缩短，此时响应丢失的重试可能再次触发 handler，应提高上限或改用共享存储。
+
+这些上限当前通过 `SessionManagerOptions` 和 `A2ANodeOptions` 配置，不在 `.env` 中暴露。`AgentProvider` 创建节点时只传入 challenge TTL 和 Session TTL；如需调整容量，应直接构造 `A2ANode` 或扩展 Provider 配置。
 
 ## 11. 超时预算
 
