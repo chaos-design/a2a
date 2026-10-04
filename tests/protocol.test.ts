@@ -414,6 +414,183 @@ test("the in-memory transport applies the same wire validation as HTTP", async (
   }
 });
 
+test("aborting a send cancels the in-flight request instead of waiting it out", async () => {
+  const { clientIdentity, node, serverIdentity } = createFixture();
+  let deliveries = 0;
+  // Held open rather than slept on, so the handler cannot finish early and no
+  // timer is left behind after the test.
+  let releaseHandler = (): void => undefined;
+  const handlerGate = new Promise<void>((resolveGate) => {
+    releaseHandler = resolveGate;
+  });
+  node.registerHandler(
+    "request",
+    async () => {
+      deliveries += 1;
+      await handlerGate;
+      return { payload: { ok: true } };
+    },
+    { requiredScopes: ["tasks:execute"] },
+  );
+  const server = createA2AHttpServer(node);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const client = new A2AClient({
+      identity: clientIdentity,
+      transport: new HttpTransport(`http://127.0.0.1:${address.port}`, {
+        // Long enough that a request which ignored cancellation would hang
+        // well past the assertions below.
+        requestTimeoutMs: 30_000,
+      }),
+      requestedScopes: ["tasks:execute"],
+      expectedAgentId: serverIdentity.agentId,
+      trustedServerKeys: {
+        [serverIdentity.keyId]: serverIdentity.publicKey,
+      },
+      retryPolicy: { maxAttempts: 4, initialDelayMs: 1, jitterRatio: 0 },
+    });
+
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const pending = client.send(
+      {
+        kind: "request",
+        recipient: serverIdentity.agentId,
+        payload: { task: "slow" },
+      },
+      { signal: controller.signal },
+    );
+    setTimeout(() => controller.abort(new Error("caller cancelled")), 150);
+
+    await assert.rejects(
+      () => pending,
+      (error: unknown) => {
+        // A caller cancellation is not a transport failure, so it must not be
+        // reported as a retriable A2AError.
+        assert.ok(
+          !(error instanceof A2AError),
+          `expected the abort reason, received ${String(error)}`,
+        );
+        assert.equal((error as Error).message, "caller cancelled");
+        return true;
+      },
+    );
+
+    assert.ok(
+      Date.now() - startedAt < 5_000,
+      "send must not wait out the request timeout after an abort",
+    );
+    // The retry budget must not be spent on work the caller cancelled.
+    assert.equal(deliveries, 1);
+  } finally {
+    releaseHandler();
+    await new Promise<void>((resolve, reject) => {
+      server.closeAllConnections();
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test("the in-memory transport refuses a pre-aborted send before the handler runs", async () => {
+  const { clientIdentity, node } = createFixture();
+  let invocations = 0;
+  node.registerHandler("request", () => {
+    invocations += 1;
+    return { payload: { ok: true } };
+  });
+  const transport = new InMemoryTransport(node);
+  const client = new A2AClient({
+    identity: clientIdentity,
+    transport,
+    requestedScopes: ["tasks:execute"],
+  });
+  await client.connect();
+
+  const controller = new AbortController();
+  controller.abort(new Error("caller cancelled"));
+
+  await assert.rejects(
+    () =>
+      client.send(
+        { kind: "request", recipient: node.identity.agentId, payload: {} },
+        { signal: controller.signal },
+      ),
+    (error: unknown) => (error as Error).message === "caller cancelled",
+  );
+  assert.equal(invocations, 0);
+});
+
+test("a retriable transport failure still consumes the retry budget", async () => {
+  const { clientIdentity, node } = createFixture();
+  node.registerHandler("request", () => ({ payload: { ok: true } }));
+  const inner = new InMemoryTransport(node);
+  let attempts = 0;
+  const transport = new FailingTransport(inner, () => {
+    attempts += 1;
+    return true;
+  });
+  const client = new A2AClient({
+    identity: clientIdentity,
+    transport,
+    requestedScopes: ["tasks:execute"],
+    retryPolicy: { maxAttempts: 3, initialDelayMs: 1, jitterRatio: 0 },
+  });
+
+  // Guards the distinction the abort fix relies on: a retriable transport
+  // failure must keep being retried rather than being swallowed as a cancel.
+  await assert.rejects(
+    () =>
+      client.send({
+        kind: "request",
+        recipient: node.identity.agentId,
+        payload: {},
+      }),
+    (error: unknown) => error instanceof A2AError && error.retriable,
+  );
+  assert.equal(attempts, 3);
+});
+
+class FailingTransport implements ClientTransport {
+  constructor(
+    private readonly inner: ClientTransport,
+    private readonly shouldFail: () => boolean,
+  ) {}
+
+  discover(): Promise<AgentCard> {
+    return this.inner.discover();
+  }
+
+  requestChallenge(request: ChallengeRequest): Promise<Challenge> {
+    return this.inner.requestChallenge(request);
+  }
+
+  verifyChallenge(
+    verification: ChallengeVerification,
+  ): Promise<SessionGrant> {
+    return this.inner.verifyChallenge(verification);
+  }
+
+  async send(
+    message: A2AMessage,
+    bearerToken: string,
+  ): Promise<DeliveryBundle> {
+    if (this.shouldFail()) {
+      throw new A2AError(
+        ErrorCode.TransportFailed,
+        "Simulated timeout",
+        { status: 503, retriable: true },
+      );
+    }
+    return this.inner.send(message, bearerToken);
+  }
+}
+
 class Single401Transport implements ClientTransport {
   sendCount = 0;
 

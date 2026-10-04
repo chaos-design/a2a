@@ -210,7 +210,21 @@ export interface ClientTransport {
   verifyChallenge(
     verification: ChallengeVerification,
   ): Promise<SessionGrant>;
-  send(message: A2AMessage, bearerToken: string): Promise<DeliveryBundle>;
+  /**
+   * Delivers a signed message.
+   *
+   * `signal` carries the caller's `SendOptions.signal`. Implementations should
+   * abandon the in-flight attempt when it aborts and reject with
+   * `signal.reason`, so a caller cancellation is never mistaken for a
+   * retriable transport failure. The parameter is optional: an existing
+   * two-argument implementation still satisfies this interface and simply
+   * ignores cancellation.
+   */
+  send(
+    message: A2AMessage,
+    bearerToken: string,
+    signal?: AbortSignal,
+  ): Promise<DeliveryBundle>;
 }
 
 export interface RetryPolicy {

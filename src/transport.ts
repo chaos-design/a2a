@@ -201,16 +201,40 @@ export class HttpTransport implements ClientTransport {
     });
   }
 
-  send(message: A2AMessage, bearerToken: string): Promise<DeliveryBundle> {
-    return this.call<DeliveryBundle>("/a2a/v1/messages", {
-      method: "POST",
-      headers: { authorization: `Bearer ${bearerToken}` },
-      body: JSON.stringify(message),
-    });
+  send(
+    message: A2AMessage,
+    bearerToken: string,
+    signal?: AbortSignal,
+  ): Promise<DeliveryBundle> {
+    return this.call<DeliveryBundle>(
+      "/a2a/v1/messages",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${bearerToken}` },
+        body: JSON.stringify(message),
+      },
+      signal,
+    );
   }
 
-  private async call<T>(path: string, init: RequestInit): Promise<T> {
+  private async call<T>(
+    path: string,
+    init: RequestInit,
+    signal?: AbortSignal,
+  ): Promise<T> {
     const controller = new AbortController();
+    // The request is bounded by two independent conditions: the configured
+    // request timeout and the caller's signal. They are not interchangeable:
+    // a timeout is a retriable transport failure, whereas a caller abort is
+    // a deliberate cancellation and must surface as the signal's reason.
+    const cancelFromCaller = (): void => {
+      controller.abort(signal?.reason);
+    };
+    if (signal?.aborted) {
+      controller.abort(signal.reason);
+    } else {
+      signal?.addEventListener("abort", cancelFromCaller, { once: true });
+    }
     const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     try {
       const response = await this.fetchImplementation(
@@ -279,6 +303,12 @@ export class HttpTransport implements ClientTransport {
       }
       return body as T;
     } catch (error) {
+      if (signal?.aborted) {
+        // A caller cancellation is not a transport failure: surfacing it as a
+        // retriable error would make the client retry work the caller just
+        // cancelled, and would re-run handler side effects.
+        throw signal.reason;
+      }
       if (error instanceof A2AError) {
         throw error;
       }
@@ -289,6 +319,7 @@ export class HttpTransport implements ClientTransport {
       );
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", cancelFromCaller);
     }
   }
 }
@@ -317,7 +348,13 @@ export class InMemoryTransport implements ClientTransport {
   async send(
     message: A2AMessage,
     bearerToken: string,
+    signal?: AbortSignal,
   ): Promise<DeliveryBundle> {
+    // Fail before the handler runs, so a cancelled request cannot cause a
+    // side effect the caller will never observe.
+    if (signal?.aborted) {
+      throw signal.reason;
+    }
     return structuredClone(
       await this.node.receive(structuredClone(message), bearerToken),
     );

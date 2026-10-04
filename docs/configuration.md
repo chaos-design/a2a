@@ -401,6 +401,24 @@ const client = new A2AClient({
 
 当 `trustedServerKeys` 为空时，客户端会使用 Agent Card 中未撤销的公钥。这属于依赖发现通道的信任，不适合高风险公网场景。
 
+### 取消单次发送
+
+`send()` 和 `sendSigned()` 接受 `SendOptions.signal`：
+
+```ts
+const controller = new AbortController();
+setTimeout(() => controller.abort(new Error("caller cancelled")), 200);
+
+await client.send(
+  { kind: "request", recipient: "agent://example.com/coordinator", payload: {} },
+  { signal: controller.signal },
+);
+```
+
+取消会同时中断进行中的 HTTP 请求和后续重试，不会等到 `requestTimeoutMs` 才返回。取消以 `signal.reason` 原样抛出，不包装成 `A2AError`，因此不会被当作可重试的传输失败而重发消息。
+
+自定义 `ClientTransport` 实现可以通过 `send()` 的第三个可选参数 `signal` 感知取消；不接收该参数的实现仍然满足接口，只是无法中断进行中的尝试。
+
 ## 8. 时间参数如何配合
 
 建议满足：

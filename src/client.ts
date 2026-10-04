@@ -169,7 +169,11 @@ export class A2AClient {
       attempt += 1;
       try {
         const grant = await this.ensureSession();
-        const bundle = await this.transport.send(message, grant.token);
+        const bundle = await this.transport.send(
+          message,
+          grant.token,
+          options.signal,
+        );
         this.verifyDelivery(message, bundle);
         if (bundle.ack.payload.status === "rejected") {
           const errorMessage = bundle.messages.find(

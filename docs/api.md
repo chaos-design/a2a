@@ -193,6 +193,8 @@ const delivery = await client.send({
 - `send(input, options?)`：创建签名消息并可靠发送。
 - `sendSigned(message, options?)`：可靠发送已签名消息，重试时不重新签名。
 
+`options` 为 `SendOptions`：`retryPolicy` 覆盖本次发送的重试策略，`signal` 用于取消。取消会中断进行中的传输并停止重试，以 `signal.reason` 抛出，详见[配置指南](./configuration.md)。
+
 `trustedServerKeys` 非空时只接受固定密钥。为空时使用 Agent Card 公钥，信任强度取决于发现传输。
 
 ## 传输
@@ -233,9 +235,15 @@ interface ClientTransport {
   discover(): Promise<AgentCard>;
   requestChallenge(request: ChallengeRequest): Promise<Challenge>;
   verifyChallenge(input: ChallengeVerification): Promise<SessionGrant>;
-  send(message: A2AMessage, token: string): Promise<DeliveryBundle>;
+  send(
+    message: A2AMessage,
+    token: string,
+    signal?: AbortSignal,
+  ): Promise<DeliveryBundle>;
 }
 ```
+
+`signal` 是可选的，用于感知调用方取消。只声明两个参数的实现仍然满足该接口。
 
 ## 状态同步
 
