@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   A2AError,
   ErrorCode,
+  assertAgentCard,
   assertValidMessage,
   canonicalJson,
   createSignedMessage,
@@ -11,6 +12,7 @@ import {
   generateEncryptionIdentity,
   generateSigningIdentity,
   verifyMessageSignature,
+  type AgentCard,
 } from "../src/index.js";
 
 test("canonical JSON is stable across object key order", () => {
@@ -65,6 +67,97 @@ test("wire validation rejects undeclared fields and unnamespaced kinds", () => {
   );
   assert.doesNotThrow(() =>
     assertValidMessage({ ...message, kind: "x-custom" }),
+  );
+});
+
+test("agent card validation rejects malformed capabilities and transports", () => {
+  const base: AgentCard = {
+    agentId: "agent://coordinator",
+    name: "Coordinator",
+    protocolVersions: ["1.0"],
+    endpoint: "http://127.0.0.1:4310",
+    transports: ["http"],
+    contentTypes: ["application/json"],
+    authentication: {
+      scheme: "A2A-Challenge",
+      proofAlgorithm: "Ed25519",
+      sessionTokenLocation: "Authorization",
+    },
+    publicKeys: [
+      {
+        keyId: "sig-1",
+        algorithm: "Ed25519",
+        publicKeyPem: "-----BEGIN PUBLIC KEY-----\n",
+        status: "active",
+      },
+    ],
+    capabilities: [],
+    limits: { maxMessageBytes: 1024, maxTtlMs: 300_000 },
+  };
+
+  assert.doesNotThrow(() =>
+    assertAgentCard({
+      ...base,
+      capabilities: [
+        {
+          name: "summarize",
+          messageKinds: ["request", "x-custom"],
+          requiredScopes: ["tasks:execute"],
+          inputSchema: { type: "object" },
+        },
+      ],
+    }),
+  );
+
+  const invalid: Array<[string, unknown]> = [
+    ["non-object capability", [{ name: "x" }, "not-an-object"]],
+    [
+      "non-string capability name",
+      [{ name: 42, messageKinds: ["request"], requiredScopes: [] }],
+    ],
+    [
+      "empty messageKinds",
+      [{ name: "x", messageKinds: [], requiredScopes: [] }],
+    ],
+    [
+      "unnamespaced messageKinds",
+      [{ name: "x", messageKinds: ["custom"], requiredScopes: [] }],
+    ],
+    [
+      "non-array requiredScopes",
+      [{ name: "x", messageKinds: ["request"], requiredScopes: null }],
+    ],
+    [
+      "undeclared capability field",
+      [
+        {
+          name: "x",
+          messageKinds: ["request"],
+          requiredScopes: [],
+          surprise: true,
+        },
+      ],
+    ],
+  ];
+
+  for (const [label, capabilities] of invalid) {
+    assert.throws(
+      () => assertAgentCard({ ...base, capabilities }),
+      (error: unknown) =>
+        error instanceof A2AError && error.code === ErrorCode.InvalidMessage,
+      `expected rejection: ${label}`,
+    );
+  }
+
+  assert.throws(
+    () => assertAgentCard({ ...base, transports: ["carrier-pigeon"] }),
+    (error: unknown) =>
+      error instanceof A2AError && error.code === ErrorCode.InvalidMessage,
+  );
+  assert.throws(
+    () => assertAgentCard({ ...base, transports: [] }),
+    (error: unknown) =>
+      error instanceof A2AError && error.code === ErrorCode.InvalidMessage,
   );
 });
 

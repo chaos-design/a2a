@@ -45,6 +45,15 @@ const BUILT_IN_KINDS = new Set([
   "state-delta",
   "state-snapshot",
 ]);
+const KNOWN_TRANSPORTS = new Set(["http", "https", "in-memory"]);
+const CAPABILITY_FIELDS = new Set([
+  "name",
+  "description",
+  "messageKinds",
+  "requiredScopes",
+  "inputSchema",
+  "outputSchema",
+]);
 
 function fail(message: string): never {
   throw new A2AError(ErrorCode.InvalidMessage, message, { status: 400 });
@@ -108,6 +117,44 @@ function assertStringArray(
   }
 }
 
+function assertMessageKind(value: unknown, name: string): asserts value is string {
+  assertIdentifier(value, name);
+  if (!BUILT_IN_KINDS.has(value) && !value.startsWith("x-")) {
+    fail(`${name} must be a built-in kind or begin with x-`);
+  }
+}
+
+function assertJson(value: unknown, name: string): void {
+  if (!isJsonValue(value)) {
+    fail(`${name} must be valid JSON`);
+  }
+}
+
+function validateCapability(value: unknown, name: string): void {
+  assertRecord(value, name);
+  assertOnlyKeys(value, name, CAPABILITY_FIELDS);
+  assertString(value.name, `${name}.name`, 255);
+  if (value.description !== undefined) {
+    assertString(value.description, `${name}.description`, 1024);
+  }
+  if (!Array.isArray(value.messageKinds) || value.messageKinds.length === 0) {
+    fail(`${name}.messageKinds must be a non-empty array`);
+  }
+  if (value.messageKinds.length > 50) {
+    fail(`${name}.messageKinds must contain at most 50 kinds`);
+  }
+  for (const kind of value.messageKinds) {
+    assertMessageKind(kind, `${name}.messageKinds[]`);
+  }
+  assertStringArray(value.requiredScopes, `${name}.requiredScopes`);
+  if (value.inputSchema !== undefined) {
+    assertJson(value.inputSchema, `${name}.inputSchema`);
+  }
+  if (value.outputSchema !== undefined) {
+    assertJson(value.outputSchema, `${name}.outputSchema`);
+  }
+}
+
 function validateTrace(value: unknown): void {
   assertRecord(value, "trace");
   assertOnlyKeys(
@@ -131,9 +178,7 @@ function validateExtensions(value: unknown): void {
     if (!key.startsWith("x-") || key.length > 128) {
       fail("Extension keys must begin with x- and be at most 128 characters");
     }
-    if (!isJsonValue(extension)) {
-      fail(`Extension ${key} is not a JSON value`);
-    }
+    assertJson(extension, `Extension ${key}`);
   }
 }
 
@@ -168,9 +213,7 @@ function validateMessageBody(
   if (!CONTENT_TYPE_PATTERN.test(value.contentType)) {
     fail("contentType is invalid");
   }
-  if (!isJsonValue(value.payload)) {
-    fail("payload must be valid JSON");
-  }
+  assertJson(value.payload, "payload");
 
   for (const field of [
     "conversationId",
@@ -237,13 +280,7 @@ export function assertValidMessage(
     );
   }
   assertIdentifier(value.id, "id");
-  assertIdentifier(value.kind, "kind");
-  if (
-    !BUILT_IN_KINDS.has(value.kind) &&
-    !value.kind.startsWith("x-")
-  ) {
-    fail("Custom message kinds must begin with x-");
-  }
+  assertMessageKind(value.kind, "kind");
   assertIdentifier(value.sender, "sender");
   if (value.recipient !== "*") {
     assertIdentifier(value.recipient, "recipient");
@@ -288,6 +325,12 @@ export function assertAgentCard(value: unknown): asserts value is AgentCard {
   assertString(value.endpoint, "agentCard.endpoint", 2048);
   assertStringArray(value.protocolVersions, "agentCard.protocolVersions", 20);
   assertStringArray(value.transports, "agentCard.transports", 20);
+  if (value.transports.length === 0) {
+    fail("agentCard.transports must declare at least one transport");
+  }
+  if (value.transports.some((item) => !KNOWN_TRANSPORTS.has(item))) {
+    fail("agentCard.transports supports only http, https, and in-memory");
+  }
   assertStringArray(value.contentTypes, "agentCard.contentTypes", 100);
 
   assertRecord(value.authentication, "agentCard.authentication");
@@ -317,6 +360,12 @@ export function assertAgentCard(value: unknown): asserts value is AgentCard {
   if (!Array.isArray(value.capabilities)) {
     fail("agentCard.capabilities must be an array");
   }
+  if (value.capabilities.length > 200) {
+    fail("agentCard.capabilities must contain at most 200 entries");
+  }
+  value.capabilities.forEach((capability, index) => {
+    validateCapability(capability, `agentCard.capabilities[${index}]`);
+  });
   assertRecord(value.limits, "agentCard.limits");
   if (
     !Number.isSafeInteger(value.limits.maxMessageBytes) ||
