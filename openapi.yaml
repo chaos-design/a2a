@@ -1,0 +1,496 @@
+openapi: 3.1.0
+info:
+  title: A2A/1.0 HTTP API
+  version: 1.0.0
+  description: HTTP binding for the A2A/1.0 agent communication protocol.
+servers:
+  - url: https://agent.example.com
+paths:
+  /.well-known/a2a-agent.json:
+    get:
+      operationId: discoverAgent
+      summary: Discover agent identity, keys, capabilities, and limits
+      responses:
+        "200":
+          description: Agent Card
+          headers:
+            A2A-Version:
+              schema:
+                const: "1.0"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentCard"
+  /a2a/v1/auth/challenge:
+    post:
+      operationId: requestChallenge
+      summary: Create a one-time authentication challenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChallengeRequest"
+      responses:
+        "200":
+          description: Challenge
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Challenge"
+        "401":
+          $ref: "#/components/responses/ProtocolError"
+        "429":
+          $ref: "#/components/responses/ProtocolError"
+  /a2a/v1/auth/verify:
+    post:
+      operationId: verifyChallenge
+      summary: Verify challenge proof and create a short-lived session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChallengeVerification"
+      responses:
+        "200":
+          description: Session grant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionGrant"
+        "401":
+          $ref: "#/components/responses/ProtocolError"
+        "429":
+          $ref: "#/components/responses/ProtocolError"
+  /a2a/v1/messages:
+    post:
+      operationId: sendMessage
+      summary: Deliver one signed A2A message
+      security:
+        - a2aBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Message"
+      responses:
+        "200":
+          description: Signed acknowledgement and optional signed messages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryBundle"
+        "400":
+          $ref: "#/components/responses/ProtocolError"
+        "401":
+          $ref: "#/components/responses/ProtocolError"
+        "403":
+          $ref: "#/components/responses/ProtocolError"
+        "404":
+          $ref: "#/components/responses/ProtocolError"
+        "408":
+          $ref: "#/components/responses/ProtocolError"
+        "413":
+          $ref: "#/components/responses/ProtocolError"
+        "429":
+          $ref: "#/components/responses/ProtocolError"
+        "500":
+          $ref: "#/components/responses/ProtocolError"
+components:
+  securitySchemes:
+    a2aBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  responses:
+    ProtocolError:
+      description: Protocol-level error
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - error
+            properties:
+              error:
+                $ref: "#/components/schemas/ErrorPayload"
+  schemas:
+    JsonValue: {}
+    ChallengeRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - agentId
+        - keyId
+        - requestedScopes
+      properties:
+        agentId:
+          type: string
+          maxLength: 255
+        keyId:
+          type: string
+          maxLength: 255
+        requestedScopes:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            maxLength: 255
+    Challenge:
+      type: object
+      additionalProperties: false
+      required:
+        - challengeId
+        - challenge
+        - agentId
+        - audience
+        - keyId
+        - serverKeyId
+        - requestedScopes
+        - expiresAt
+        - serverSignature
+      properties:
+        challengeId:
+          type: string
+        challenge:
+          type: string
+          contentEncoding: base64url
+        agentId:
+          type: string
+        audience:
+          type: string
+        keyId:
+          type: string
+        serverKeyId:
+          type: string
+        requestedScopes:
+          type: array
+          items:
+            type: string
+        expiresAt:
+          type: string
+          format: date-time
+        serverSignature:
+          type: string
+          contentEncoding: base64url
+    ChallengeVerification:
+      type: object
+      additionalProperties: false
+      required:
+        - challengeId
+        - signature
+      properties:
+        challengeId:
+          type: string
+        signature:
+          type: string
+          contentEncoding: base64url
+    SessionGrant:
+      type: object
+      additionalProperties: false
+      required:
+        - token
+        - tokenType
+        - agentId
+        - scopes
+        - expiresAt
+      properties:
+        token:
+          type: string
+        tokenType:
+          const: Bearer
+        agentId:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        expiresAt:
+          type: string
+          format: date-time
+    AgentCard:
+      type: object
+      additionalProperties: false
+      required:
+        - agentId
+        - name
+        - protocolVersions
+        - endpoint
+        - transports
+        - contentTypes
+        - authentication
+        - publicKeys
+        - capabilities
+        - limits
+      properties:
+        agentId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        protocolVersions:
+          type: array
+          items:
+            type: string
+        endpoint:
+          type: string
+          format: uri
+        transports:
+          type: array
+          items:
+            enum:
+              - https
+              - http
+              - in-memory
+        contentTypes:
+          type: array
+          items:
+            type: string
+        authentication:
+          type: object
+          required:
+            - scheme
+            - proofAlgorithm
+            - sessionTokenLocation
+          properties:
+            scheme:
+              const: A2A-Challenge
+            proofAlgorithm:
+              const: Ed25519
+            sessionTokenLocation:
+              const: Authorization
+        publicKeys:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicKey"
+        capabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/Capability"
+        limits:
+          type: object
+          required:
+            - maxMessageBytes
+            - maxTtlMs
+          properties:
+            maxMessageBytes:
+              type: integer
+              minimum: 1
+            maxTtlMs:
+              type: integer
+              minimum: 1
+        extensions:
+          type: object
+          propertyNames:
+            pattern: "^x-"
+          additionalProperties:
+            $ref: "#/components/schemas/JsonValue"
+    PublicKey:
+      type: object
+      additionalProperties: false
+      required:
+        - keyId
+        - algorithm
+        - publicKeyPem
+        - status
+      properties:
+        keyId:
+          type: string
+        algorithm:
+          const: Ed25519
+        publicKeyPem:
+          type: string
+        status:
+          enum:
+            - active
+            - retiring
+            - revoked
+    Capability:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - messageKinds
+        - requiredScopes
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        messageKinds:
+          type: array
+          items:
+            type: string
+        requiredScopes:
+          type: array
+          items:
+            type: string
+        inputSchema:
+          $ref: "#/components/schemas/JsonValue"
+        outputSchema:
+          $ref: "#/components/schemas/JsonValue"
+    Message:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol
+        - id
+        - kind
+        - sender
+        - recipient
+        - createdAt
+        - ttlMs
+        - sequence
+        - contentType
+        - payload
+        - security
+      properties:
+        protocol:
+          const: "1.0"
+        id:
+          type: string
+          maxLength: 255
+        kind:
+          type: string
+          maxLength: 255
+        sender:
+          type: string
+          maxLength: 255
+        recipient:
+          type: string
+          maxLength: 255
+        createdAt:
+          type: string
+          format: date-time
+        ttlMs:
+          type: integer
+          minimum: 1
+          maximum: 300000
+        sequence:
+          type: integer
+          minimum: 0
+        contentType:
+          type: string
+        payload:
+          $ref: "#/components/schemas/JsonValue"
+        conversationId:
+          type: string
+        correlationId:
+          type: string
+        causationId:
+          type: string
+        idempotencyKey:
+          type: string
+        requiredScopes:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+        trace:
+          $ref: "#/components/schemas/TraceContext"
+        extensions:
+          type: object
+          propertyNames:
+            pattern: "^x-"
+          additionalProperties:
+            $ref: "#/components/schemas/JsonValue"
+        security:
+          $ref: "#/components/schemas/MessageSecurity"
+    MessageSecurity:
+      type: object
+      additionalProperties: false
+      required:
+        - keyId
+        - algorithm
+        - payloadDigest
+        - signature
+      properties:
+        keyId:
+          type: string
+        algorithm:
+          const: Ed25519
+        payloadDigest:
+          type: string
+          contentEncoding: base64url
+        signature:
+          type: string
+          contentEncoding: base64url
+    TraceContext:
+      type: object
+      additionalProperties: false
+      required:
+        - traceId
+        - spanId
+      properties:
+        traceId:
+          type: string
+          maxLength: 64
+        spanId:
+          type: string
+          maxLength: 32
+        traceFlags:
+          type: string
+          maxLength: 8
+        traceState:
+          type: string
+          maxLength: 512
+    AckPayload:
+      type: object
+      additionalProperties: false
+      required:
+        - messageId
+        - status
+      properties:
+        messageId:
+          type: string
+        status:
+          enum:
+            - accepted
+            - completed
+            - rejected
+            - duplicate
+        code:
+          type: string
+        detail:
+          type: string
+    ErrorPayload:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+        - retriable
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        retriable:
+          type: boolean
+        details:
+          $ref: "#/components/schemas/JsonValue"
+    DeliveryBundle:
+      type: object
+      additionalProperties: false
+      required:
+        - ack
+        - messages
+      properties:
+        ack:
+          allOf:
+            - $ref: "#/components/schemas/Message"
+            - type: object
+              properties:
+                kind:
+                  const: ack
+                payload:
+                  $ref: "#/components/schemas/AckPayload"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"

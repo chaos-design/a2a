@@ -1,0 +1,47 @@
+{
+  "name": "@a2a/reference",
+  "version": "1.0.0",
+  "description": "A secure, reliable, and extensible Agent-to-Agent communication protocol reference implementation.",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    ".env.example",
+    "openapi.yaml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test tests/**/*.test.ts",
+    "test:coverage": "tsx --test --experimental-test-coverage tests/**/*.test.ts",
+    "demo": "tsx examples/http-demo.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "a2a",
+    "agents",
+    "protocol",
+    "ed25519",
+    "state-sync"
+  ],
+  "license": "Apache-2.0",
+  "dependencies": {
+    "dotenv": "^17.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
