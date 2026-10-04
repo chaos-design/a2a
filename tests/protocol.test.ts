@@ -379,6 +379,41 @@ test("delivery and conversation caches stay within their configured bounds", asy
   assert.equal(internals.sequenceByConversation.size, 4);
 });
 
+test("the in-memory transport applies the same wire validation as HTTP", async () => {
+  const { node } = createFixture();
+  const transport = new InMemoryTransport(node);
+
+  for (const malformed of [
+    null,
+    { agentId: "agent://worker", keyId: "key" },
+    { agentId: "agent://worker", keyId: "key", requestedScopes: "tasks" },
+    { requestedScopes: [] },
+  ]) {
+    await assert.rejects(
+      () => transport.requestChallenge(malformed as ChallengeRequest),
+      (error: unknown) =>
+        error instanceof A2AError &&
+        error.code === ErrorCode.InvalidMessage &&
+        !(error instanceof TypeError),
+      `expected a protocol error for ${JSON.stringify(malformed)}`,
+    );
+  }
+
+  for (const malformed of [
+    { challengeId: 12_345 },
+    { challengeId: "challenge-1", signature: "not base64url!" },
+  ]) {
+    await assert.rejects(
+      () => transport.verifyChallenge(malformed as ChallengeVerification),
+      (error: unknown) =>
+        error instanceof A2AError &&
+        error.code === ErrorCode.InvalidMessage &&
+        !(error instanceof TypeError),
+      `expected a protocol error for ${JSON.stringify(malformed)}`,
+    );
+  }
+});
+
 class Single401Transport implements ClientTransport {
   sendCount = 0;
 

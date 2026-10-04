@@ -222,7 +222,7 @@ server.listen(4310, "127.0.0.1");
 
 ### `InMemoryTransport`
 
-进程内调用，仍执行序列化副本、认证、授权、签名和去重逻辑，适合测试和同进程智能体。
+进程内调用，仍执行线消息边界校验、认证、授权、签名和去重逻辑，适合测试和同进程智能体。`requestChallenge` 和 `verifyChallenge` 与 HTTP 绑定使用同一组 `assert*` 校验，非法输入统一返回 `A2AError`。
 
 ### 自定义传输
 

@@ -301,15 +301,17 @@ export class InMemoryTransport implements ClientTransport {
   }
 
   async requestChallenge(request: ChallengeRequest): Promise<Challenge> {
-    return structuredClone(this.node.issueChallenge(structuredClone(request)));
+    const input: unknown = structuredClone(request);
+    assertChallengeRequest(input);
+    return structuredClone(this.node.issueChallenge(input));
   }
 
   async verifyChallenge(
     verification: ChallengeVerification,
   ): Promise<SessionGrant> {
-    return structuredClone(
-      this.node.verifyChallenge(structuredClone(verification)),
-    );
+    const input: unknown = structuredClone(verification);
+    assertChallengeVerification(input);
+    return structuredClone(this.node.verifyChallenge(input));
   }
 
   async send(
