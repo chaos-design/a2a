@@ -205,10 +205,14 @@ export interface DeliveryBundle {
 }
 
 export interface ClientTransport {
-  discover(): Promise<AgentCard>;
-  requestChallenge(request: ChallengeRequest): Promise<Challenge>;
+  discover(signal?: AbortSignal): Promise<AgentCard>;
+  requestChallenge(
+    request: ChallengeRequest,
+    signal?: AbortSignal,
+  ): Promise<Challenge>;
   verifyChallenge(
     verification: ChallengeVerification,
+    signal?: AbortSignal,
   ): Promise<SessionGrant>;
   /**
    * Delivers a signed message.
@@ -237,6 +241,10 @@ export interface RetryPolicy {
 
 export interface SendOptions {
   retryPolicy?: Partial<RetryPolicy>;
+  signal?: AbortSignal;
+}
+
+export interface ConnectOptions {
   signal?: AbortSignal;
 }
 

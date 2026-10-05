@@ -86,6 +86,19 @@ export const binaryCodec: PayloadCodec<Uint8Array> = {
     };
   },
   decode(payload): Uint8Array {
+    // The payload arrives from the wire, so guard the shape before reading it:
+    // dereferencing null would raise a TypeError instead of a protocol error.
+    if (
+      payload === null ||
+      typeof payload !== "object" ||
+      Array.isArray(payload)
+    ) {
+      throw new A2AError(
+        ErrorCode.InvalidMessage,
+        "Binary payload must use base64url encoding",
+        { status: 400 },
+      );
+    }
     const encoded = payload as Partial<EncodedBytes>;
     if (
       encoded.encoding !== "base64url" ||

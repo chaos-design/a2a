@@ -342,6 +342,139 @@ test("a malformed acknowledgement yields a protocol error, not a TypeError", asy
   );
 });
 
+test("concurrent duplicates of one message invoke the handler once", async () => {
+  const { clientIdentity, node, serverIdentity } = createFixture();
+  let invocations = 0;
+  node.registerHandler(
+    "request",
+    async () => {
+      invocations += 1;
+      // Real handler latency keeps the copies overlapping, which is exactly the
+      // window in which the result cache alone cannot deduplicate.
+      await new Promise((release) => setTimeout(release, 25));
+      return { payload: { invocations } };
+    },
+    { requiredScopes: ["tasks:execute"] },
+  );
+
+  const challenge = node.issueChallenge({
+    agentId: clientIdentity.agentId,
+    keyId: clientIdentity.keyId,
+    requestedScopes: ["tasks:execute"],
+  });
+  const grant = node.verifyChallenge({
+    challengeId: challenge.challengeId,
+    signature: signChallenge(challenge, clientIdentity),
+  });
+  const signed = createSignedMessage(clientIdentity, {
+    kind: "request",
+    recipient: serverIdentity.agentId,
+    payload: { op: "charge" },
+    conversationId: "concurrent-1",
+  });
+
+  const bundles = await Promise.all(
+    Array.from({ length: 5 }, () =>
+      node.receive(structuredClone(signed), grant.token),
+    ),
+  );
+
+  assert.equal(invocations, 1, "the side effect must happen exactly once");
+  const statuses = bundles.map((bundle) => bundle.ack.payload.status);
+  assert.equal(statuses.filter((status) => status === "completed").length, 1);
+  assert.equal(statuses.filter((status) => status === "duplicate").length, 4);
+
+  // Every duplicate must observe the one real response, not an empty result.
+  for (const bundle of bundles) {
+    assert.deepEqual(bundle.messages[0]?.payload, { invocations: 1 });
+  }
+});
+
+test("a rejected handler still deduplicates for concurrent copies", async () => {
+  const { clientIdentity, node, serverIdentity } = createFixture();
+  let invocations = 0;
+  node.registerHandler(
+    "request",
+    async () => {
+      invocations += 1;
+      await new Promise((release) => setTimeout(release, 25));
+      throw new A2AError(ErrorCode.Conflict, "already applied", { status: 409 });
+    },
+    { requiredScopes: ["tasks:execute"] },
+  );
+
+  const challenge = node.issueChallenge({
+    agentId: clientIdentity.agentId,
+    keyId: clientIdentity.keyId,
+    requestedScopes: ["tasks:execute"],
+  });
+  const grant = node.verifyChallenge({
+    challengeId: challenge.challengeId,
+    signature: signChallenge(challenge, clientIdentity),
+  });
+  const signed = createSignedMessage(clientIdentity, {
+    kind: "request",
+    recipient: serverIdentity.agentId,
+    payload: { op: "charge" },
+  });
+
+  const bundles = await Promise.all(
+    Array.from({ length: 3 }, () =>
+      node.receive(structuredClone(signed), grant.token),
+    ),
+  );
+
+  assert.equal(invocations, 1);
+  assert.deepEqual(
+    bundles.map((bundle) => bundle.ack.payload.status),
+    ["rejected", "duplicate", "duplicate"],
+  );
+});
+
+test("distinct messages still run concurrently", async () => {
+  const { clientIdentity, node, serverIdentity } = createFixture();
+  let peak = 0;
+  let active = 0;
+  node.registerHandler(
+    "request",
+    async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((release) => setTimeout(release, 25));
+      active -= 1;
+      return { payload: { ok: true } };
+    },
+    { requiredScopes: ["tasks:execute"] },
+  );
+
+  const challenge = node.issueChallenge({
+    agentId: clientIdentity.agentId,
+    keyId: clientIdentity.keyId,
+    requestedScopes: ["tasks:execute"],
+  });
+  const grant = node.verifyChallenge({
+    challengeId: challenge.challengeId,
+    signature: signChallenge(challenge, clientIdentity),
+  });
+
+  const messages = ["a", "b", "c", "d"].map((id) =>
+    createSignedMessage(clientIdentity, {
+      kind: "request",
+      recipient: serverIdentity.agentId,
+      payload: { id },
+    }),
+  );
+  await Promise.all(
+    messages.map((message) =>
+      node.receive(structuredClone(message), grant.token),
+    ),
+  );
+
+  // The in-flight reservation is keyed per message, so it must not serialise
+  // unrelated work into a queue.
+  assert.equal(peak, 4);
+});
+
 test("delivery and conversation caches stay within their configured bounds", async () => {
   const { clientIdentity, node } = createFixture();
   node.registerHandler("request", () => ({ payload: { ok: true } }));
@@ -457,6 +590,10 @@ test("aborting a send cancels the in-flight request instead of waiting it out", 
     });
 
     const controller = new AbortController();
+    // Authenticate up front so the abort below unambiguously lands on the
+    // delivery attempt rather than on the connect/authentication phase.
+    await client.connect();
+
     const startedAt = Date.now();
     const pending = client.send(
       {
@@ -493,6 +630,334 @@ test("aborting a send cancels the in-flight request instead of waiting it out", 
     await new Promise<void>((resolve, reject) => {
       server.closeAllConnections();
       server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test("the caller's signal reaches discovery and authentication", async () => {
+  const { clientIdentity, node } = createFixture();
+  node.registerHandler("request", () => ({ payload: { ok: true } }), {
+    requiredScopes: ["tasks:execute"],
+  });
+  const inner = new InMemoryTransport(node);
+  const seen: Array<[string, AbortSignal | undefined]> = [];
+
+  // A conforming transport that honours the signal it is handed. This is the
+  // contract the client owes custom transports, so the test asserts the signal
+  // actually arrives rather than that a slow transport is interrupted.
+  const recording: ClientTransport = {
+    discover(signal) {
+      seen.push(["discover", signal]);
+      return inner.discover(signal);
+    },
+    async requestChallenge(request, signal) {
+      seen.push(["requestChallenge", signal]);
+      return inner.requestChallenge(request, signal);
+    },
+    async verifyChallenge(verification, signal) {
+      seen.push(["verifyChallenge", signal]);
+      return inner.verifyChallenge(verification, signal);
+    },
+    send(message, token, signal) {
+      seen.push(["send", signal]);
+      return inner.send(message, token, signal);
+    },
+  };
+
+  const client = new A2AClient({
+    identity: clientIdentity,
+    transport: recording,
+    requestedScopes: ["tasks:execute"],
+  });
+
+  const controller = new AbortController();
+  await client.send(
+    { kind: "request", recipient: node.identity.agentId, payload: {} },
+    { signal: controller.signal },
+  );
+
+  assert.deepEqual(
+    seen.map(([stage]) => stage),
+    ["discover", "requestChallenge", "verifyChallenge", "send"],
+  );
+  for (const [stage, signal] of seen) {
+    assert.equal(
+      signal,
+      controller.signal,
+      `${stage} did not receive the caller's signal`,
+    );
+  }
+});
+
+test("a pre-aborted signal short-circuits connect and every auth step", async () => {
+  const { clientIdentity, node } = createFixture();
+  const inner = new InMemoryTransport(node);
+  const stages: string[] = [];
+  const controller = new AbortController();
+  controller.abort(new Error("caller cancelled"));
+
+  const client = new A2AClient({
+    identity: clientIdentity,
+    transport: {
+      async discover() {
+        stages.push("discover");
+        return inner.discover();
+      },
+      async requestChallenge() {
+        stages.push("requestChallenge");
+        throw new Error("unreachable");
+      },
+      async verifyChallenge() {
+        stages.push("verifyChallenge");
+        throw new Error("unreachable");
+      },
+      async send() {
+        stages.push("send");
+        throw new Error("unreachable");
+      },
+    } satisfies ClientTransport,
+    requestedScopes: ["tasks:execute"],
+  });
+
+  await assert.rejects(
+    () => client.connect({ signal: controller.signal }),
+    (error: unknown) => (error as Error).message === "caller cancelled",
+  );
+  await assert.rejects(
+    () =>
+      client.send(
+        { kind: "request", recipient: node.identity.agentId, payload: {} },
+        { signal: controller.signal },
+      ),
+    (error: unknown) => (error as Error).message === "caller cancelled",
+  );
+  assert.deepEqual(stages, []);
+});
+
+test("a retriable re-authentication failure still consumes retries", async () => {
+  const { clientIdentity, node } = createFixture();
+  node.registerHandler("request", () => ({ payload: { ok: true } }));
+  const inner = new InMemoryTransport(node);
+
+  // Stands in for a slow or unreachable authentication endpoint.
+  class FlakyAuthTransport implements ClientTransport {
+    sends = 0;
+    auths = 0;
+    /** Fail the next authentication only, so the retry can recover. */
+    failNextAuth = false;
+    discover(): Promise<AgentCard> {
+      return inner.discover();
+    }
+    requestChallenge(request: ChallengeRequest): Promise<Challenge> {
+      this.auths += 1;
+      if (this.failNextAuth) {
+        this.failNextAuth = false;
+        return Promise.reject(
+          new A2AError(ErrorCode.TransportFailed, "auth endpoint down", {
+            status: 503,
+            retriable: true,
+          }),
+        );
+      }
+      return inner.requestChallenge(request);
+    }
+    verifyChallenge(
+      verification: ChallengeVerification,
+    ): Promise<SessionGrant> {
+      return inner.verifyChallenge(verification);
+    }
+    async send(
+      message: A2AMessage,
+      bearerToken: string,
+    ): Promise<DeliveryBundle> {
+      this.sends += 1;
+      if (this.sends === 1) {
+        throw new A2AError(ErrorCode.AuthenticationRequired, "expired", {
+          status: 401,
+        });
+      }
+      return inner.send(message, bearerToken);
+    }
+  }
+
+  const transport = new FlakyAuthTransport();
+  const client = new A2AClient({
+    identity: clientIdentity,
+    transport,
+    requestedScopes: ["tasks:execute"],
+    retryPolicy: { maxAttempts: 4, initialDelayMs: 1, jitterRatio: 0 },
+  });
+  // The first send gets a 401 and triggers a re-authentication; that
+  // re-authentication then fails transiently. That failure used to escape the
+  // retry loop and abort the whole send.
+  await client.connect();
+  transport.failNextAuth = true;
+
+  const delivery = await client.send({
+    kind: "request",
+    recipient: node.identity.agentId,
+    payload: { task: "auth-then-retry" },
+  });
+
+  assert.equal(delivery.ack.payload.status, "completed");
+  assert.equal(transport.sends, 2);
+  assert.equal(
+    transport.auths,
+    3,
+    "expected connect, the failed re-auth, and the retried re-auth",
+  );
+});
+
+test("a hard re-authentication failure still fails fast", async () => {
+  const { clientIdentity, node } = createFixture();
+  node.registerHandler("request", () => ({ payload: { ok: true } }));
+  const inner = new InMemoryTransport(node);
+
+  class RevokedTransport implements ClientTransport {
+    sends = 0;
+    revoke = false;
+    discover(): Promise<AgentCard> {
+      return inner.discover();
+    }
+    requestChallenge(request: ChallengeRequest): Promise<Challenge> {
+      if (this.revoke) {
+        // Non-retryable: the peer key was revoked, so replaying cannot help.
+        return Promise.reject(
+          new A2AError(ErrorCode.AuthenticationFailed, "peer revoked", {
+            status: 401,
+          }),
+        );
+      }
+      return inner.requestChallenge(request);
+    }
+    verifyChallenge(
+      verification: ChallengeVerification,
+    ): Promise<SessionGrant> {
+      return inner.verifyChallenge(verification);
+    }
+    async send(
+      message: A2AMessage,
+      bearerToken: string,
+    ): Promise<DeliveryBundle> {
+      this.sends += 1;
+      if (this.sends === 1) {
+        throw new A2AError(ErrorCode.AuthenticationRequired, "expired", {
+          status: 401,
+        });
+      }
+      return inner.send(message, bearerToken);
+    }
+  }
+
+  const transport = new RevokedTransport();
+  const client = new A2AClient({
+    identity: clientIdentity,
+    transport,
+    requestedScopes: ["tasks:execute"],
+    retryPolicy: { maxAttempts: 4, initialDelayMs: 1, jitterRatio: 0 },
+  });
+  await client.connect();
+  transport.revoke = true;
+
+  await assert.rejects(
+    () =>
+      client.send({
+        kind: "request",
+        recipient: node.identity.agentId,
+        payload: {},
+      }),
+    (error: unknown) =>
+      error instanceof A2AError &&
+      error.code === ErrorCode.AuthenticationFailed,
+  );
+  assert.equal(transport.sends, 1);
+});
+
+test("the HTTP body cap honours the limit the agent advertises", async () => {
+  const serverIdentity = generateSigningIdentity("agent://coordinator");
+  const peers = new PeerRegistry();
+  const node = new A2ANode({
+    identity: serverIdentity,
+    peers,
+    name: "Coordinator",
+    endpoint: "http://127.0.0.1:4310",
+    maxMessageBytes: 4 * 1024 * 1024,
+  });
+
+  // No explicit maxRequestBytes: it must follow the advertised limit rather
+  // than silently reverting to an independent 1 MB default.
+  const server = createA2AHttpServer(node);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    assert.equal(node.getAgentCard().limits.maxMessageBytes, 4_194_304);
+
+    const accepted = await fetch(
+      `http://127.0.0.1:${address.port}/a2a/v1/auth/challenge`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pad: "x".repeat(2 * 1024 * 1024) }),
+      },
+    );
+    // 2 MB is inside the advertised limit, so it must not be rejected as too
+    // large. It fails later, on the missing peer, which is a different error.
+    assert.notEqual(accepted.status, 413);
+
+    const rejected = await fetch(
+      `http://127.0.0.1:${address.port}/a2a/v1/auth/challenge`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pad: "x".repeat(5 * 1024 * 1024) }),
+      },
+    );
+    assert.equal(rejected.status, 413);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+  }
+});
+
+test("an explicit maxRequestBytes may still tighten the body cap", async () => {
+  const serverIdentity = generateSigningIdentity("agent://coordinator");
+  const peers = new PeerRegistry();
+  const node = new A2ANode({
+    identity: serverIdentity,
+    peers,
+    name: "Coordinator",
+    endpoint: "http://127.0.0.1:4310",
+    maxMessageBytes: 4 * 1024 * 1024,
+  });
+  const server = createA2AHttpServer(node, { maxRequestBytes: 1024 });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/a2a/v1/auth/challenge`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pad: "x".repeat(4096) }),
+      },
+    );
+    assert.equal(response.status, 413);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
     });
   }
 });

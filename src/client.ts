@@ -11,6 +11,7 @@ import type {
   A2AMessage,
   AckStatus,
   AgentCard,
+  ConnectOptions,
   ClientTransport,
   DeliveryBundle,
   JsonValue,
@@ -87,8 +88,12 @@ export class A2AClient {
     }
   }
 
-  async connect(): Promise<AgentCard> {
-    const card = await this.transport.discover();
+  async connect(options: ConnectOptions = {}): Promise<AgentCard> {
+    const signal = options.signal;
+    if (signal?.aborted) {
+      throw signal.reason;
+    }
+    const card = await this.transport.discover(signal);
     assertAgentCard(card);
     if (
       this.expectedAgentId !== undefined &&
@@ -129,7 +134,7 @@ export class A2AClient {
       );
     }
     this.card = card;
-    this.grant = await this.authenticate();
+    this.grant = await this.authenticate(signal);
     return structuredClone(card);
   }
 
@@ -137,7 +142,7 @@ export class A2AClient {
     input: MessageInput<T>,
     options: SendOptions = {},
   ): Promise<DeliveryBundle> {
-    await this.ensureConnected();
+    await this.ensureConnected(options.signal);
     const conversationId = input.conversationId ?? input.idempotencyKey;
     const sequence =
       input.sequence ??
@@ -155,7 +160,7 @@ export class A2AClient {
     message: A2AMessage,
     options: SendOptions = {},
   ): Promise<DeliveryBundle> {
-    await this.ensureConnected();
+    await this.ensureConnected(options.signal);
     const policy = { ...this.retryPolicy, ...options.retryPolicy };
     this.assertRetryPolicy(policy);
 
@@ -168,7 +173,7 @@ export class A2AClient {
       }
       attempt += 1;
       try {
-        const grant = await this.ensureSession();
+        const grant = await this.ensureSession(options.signal);
         const bundle = await this.transport.send(
           message,
           grant.token,
@@ -209,21 +214,30 @@ export class A2AClient {
           error.status === 401 &&
           !refreshedSession
         ) {
-          // Re-authentication is not a delivery attempt, so it must not
-          // consume the retry budget. The protocol guarantees exactly one
-          // refresh; a second 401 falls through and is surfaced.
-          this.grant = undefined;
-          this.grant = await this.authenticate();
+          // Re-authentication is not a delivery attempt, so on success it must
+          // not consume the retry budget. A failed re-authentication is
+          // different: it consumed this attempt, and it is a delivery failure
+          // like any other, so the same retry policy applies. Letting it
+          // propagate instead would let a transient authentication outage
+          // abort a send that still had retries left.
           refreshedSession = true;
-          attempt -= 1;
+          this.grant = undefined;
+          try {
+            this.grant = await this.authenticate(options.signal);
+            attempt -= 1;
+          } catch (authError) {
+            lastError = authError;
+            if (!this.isRetryable(authError, attempt, policy)) {
+              throw authError;
+            }
+            await this.delay(
+              this.retryDelay(attempt, policy),
+              options.signal,
+            );
+          }
           continue;
         }
-        if (
-          attempt >= policy.maxAttempts ||
-          !(error instanceof A2AError) ||
-          error.status === 422 ||
-          !error.retriable
-        ) {
+        if (!this.isRetryable(error, attempt, policy)) {
           throw error;
         }
         await this.delay(this.retryDelay(attempt, policy), options.signal);
@@ -232,29 +246,53 @@ export class A2AClient {
     throw lastError;
   }
 
-  private async ensureConnected(): Promise<void> {
+  /**
+   * Decides whether a failed attempt may be retried under `policy`.
+   *
+   * Only protocol errors are retried. A 422 means the remote handler rejected
+   * the message, so replaying it would repeat a deliberate refusal, and a
+   * non-retryable error is a decision the caller has to make.
+   */
+  private isRetryable(
+    error: unknown,
+    attempt: number,
+    policy: RetryPolicy,
+  ): boolean {
+    if (!(error instanceof A2AError)) {
+      return false;
+    }
+    if (attempt >= policy.maxAttempts || error.status === 422) {
+      return false;
+    }
+    return error.retriable;
+  }
+
+  private async ensureConnected(signal?: AbortSignal): Promise<void> {
     if (!this.card) {
-      await this.connect();
+      await this.connect(signal ? { signal } : {});
     }
   }
 
-  private async ensureSession(): Promise<SessionGrant> {
+  private async ensureSession(signal?: AbortSignal): Promise<SessionGrant> {
     if (
       !this.grant ||
       Date.parse(this.grant.expiresAt) - this.sessionRefreshMarginMs <=
         Date.now()
     ) {
-      this.grant = await this.authenticate();
+      this.grant = await this.authenticate(signal);
     }
     return this.grant;
   }
 
-  private async authenticate(): Promise<SessionGrant> {
-    const challenge = await this.transport.requestChallenge({
-      agentId: this.identity.agentId,
-      keyId: this.identity.keyId,
-      requestedScopes: this.requestedScopes,
-    });
+  private async authenticate(signal?: AbortSignal): Promise<SessionGrant> {
+    const challenge = await this.transport.requestChallenge(
+      {
+        agentId: this.identity.agentId,
+        keyId: this.identity.keyId,
+        requestedScopes: this.requestedScopes,
+      },
+      signal,
+    );
     assertChallenge(challenge);
     const expectedScopes = [...this.requestedScopes].sort();
     if (
@@ -288,10 +326,13 @@ export class A2AClient {
       );
     }
 
-    const grant = await this.transport.verifyChallenge({
-      challengeId: challenge.challengeId,
-      signature: signChallenge(challenge, this.identity),
-    });
+    const grant = await this.transport.verifyChallenge(
+      {
+        challengeId: challenge.challengeId,
+        signature: signChallenge(challenge, this.identity),
+      },
+      signal,
+    );
     assertSessionGrant(grant);
     if (
       grant.tokenType !== "Bearer" ||

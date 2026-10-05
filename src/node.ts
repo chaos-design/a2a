@@ -25,6 +25,7 @@ import type {
   MessageHandler,
   MessageKind,
   SessionGrant,
+  SessionPrincipal,
   SigningIdentity,
 } from "./types.js";
 import { assertValidMessage } from "./validation.js";
@@ -69,12 +70,24 @@ export class A2ANode {
   readonly identity: SigningIdentity;
   readonly peers: PeerRegistry;
   readonly sessions: SessionManager;
+  /**
+   * Largest protocol message this node accepts, also advertised to peers in
+   * `limits.maxMessageBytes`. Transports use it as their default body cap so
+   * the advertised limit and the enforced limit cannot drift apart.
+   */
+  readonly maxMessageBytes: number;
 
   private readonly handlers = new Map<MessageKind, HandlerRegistration>();
   private readonly processed = new Map<string, CachedDelivery>();
+  /**
+   * Deliveries currently inside a handler, keyed like `processed`. Reserves a
+   * key before the handler is awaited so concurrent duplicates join the
+   * in-flight attempt instead of starting their own. Entries are removed as
+   * soon as the attempt settles.
+   */
+  private readonly inFlight = new Map<string, Promise<DeliveryBundle>>();
   private readonly sequenceByConversation = new Map<string, number>();
   private readonly now: () => number;
-  private readonly maxMessageBytes: number;
   private readonly maxTtlMs: number;
   private readonly allowedClockSkewMs: number;
   private readonly maxProcessedMessages: number;
@@ -215,6 +228,21 @@ export class A2ANode {
         messages: cached.bundle.messages,
       };
     }
+
+    // A duplicate that arrives while the first attempt is still inside the
+    // handler must not start a second invocation. The result cache alone
+    // cannot prevent that, because it is only written once the handler has
+    // returned, leaving a window in which every concurrent copy sees a miss.
+    // Reserving the key in an in-flight map closes it.
+    const inProgress = this.inFlight.get(cacheKey);
+    if (inProgress) {
+      const settled = await inProgress;
+      return {
+        ack: this.createAck(message, "duplicate"),
+        messages: settled.messages,
+      };
+    }
+
     this.assertFresh(message);
 
     const registration = this.handlers.get(message.kind);
@@ -230,6 +258,29 @@ export class A2ANode {
       ...(message.requiredScopes ?? []),
     ]);
 
+    // `processMessage` suspends at its first await and returns a pending
+    // promise, so the reservation below is published before this method yields.
+    // Concurrent duplicates therefore observe it and wait instead of dispatching.
+    const delivery = this.processMessage(
+      cacheKey,
+      message,
+      registration,
+      principal,
+    );
+    this.inFlight.set(cacheKey, delivery);
+    try {
+      return await delivery;
+    } finally {
+      this.inFlight.delete(cacheKey);
+    }
+  }
+
+  private async processMessage(
+    cacheKey: string,
+    message: A2AMessage,
+    registration: HandlerRegistration,
+    principal: SessionPrincipal,
+  ): Promise<DeliveryBundle> {
     let bundle: DeliveryBundle;
     try {
       const result = await registration.handler({
