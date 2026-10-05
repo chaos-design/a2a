@@ -189,11 +189,21 @@ const delivery = await client.send({
 });
 ```
 
-- `connect()`：发现 Agent Card 并认证。
+- `connect(options?)`：发现 Agent Card 并认证。`options.signal` 可取消发现与认证。
 - `send(input, options?)`：创建签名消息并可靠发送。
 - `sendSigned(message, options?)`：可靠发送已签名消息，重试时不重新签名。
 
 `options` 为 `SendOptions`：`retryPolicy` 覆盖本次发送的重试策略，`signal` 用于取消。取消会中断进行中的传输并停止重试，以 `signal.reason` 抛出，详见[配置指南](./configuration.md)。
+
+重试预算的消耗规则：
+
+| 失败 | 是否消耗预算 | 说明 |
+| --- | --- | --- |
+| 401 触发重新认证 | 否 | 认证成功后恢复完整预算 |
+| 重新认证本身失败 | 是 | 瞬时故障可继续重试，不可重试则立即失败 |
+| 可重试的传输失败 | 是 | 受 `maxAttempts` 限制 |
+| 422 handler 拒绝 | 是（立即抛出） | 重放只会重复一次蓄意拒绝 |
+| 不可重试错误 | 是（立即抛出） | 由调用方决策 |
 
 `trustedServerKeys` 非空时只接受固定密钥。为空时使用 Agent Card 公钥，信任强度取决于发现传输。
 
@@ -232,9 +242,15 @@ server.listen(4310, "127.0.0.1");
 
 ```ts
 interface ClientTransport {
-  discover(): Promise<AgentCard>;
-  requestChallenge(request: ChallengeRequest): Promise<Challenge>;
-  verifyChallenge(input: ChallengeVerification): Promise<SessionGrant>;
+  discover(signal?: AbortSignal): Promise<AgentCard>;
+  requestChallenge(
+    request: ChallengeRequest,
+    signal?: AbortSignal,
+  ): Promise<Challenge>;
+  verifyChallenge(
+    verification: ChallengeVerification,
+    signal?: AbortSignal,
+  ): Promise<SessionGrant>;
   send(
     message: A2AMessage,
     token: string,
@@ -243,7 +259,7 @@ interface ClientTransport {
 }
 ```
 
-`signal` 是可选的，用于感知调用方取消。只声明两个参数的实现仍然满足该接口。
+四个方法的 `signal` 都是可选的，用于感知调用方取消。只声明更少参数的实现仍然满足该接口，只是无法中断进行中的尝试。
 
 ## 状态同步
 

@@ -415,9 +415,15 @@ await client.send(
 );
 ```
 
-取消会同时中断进行中的 HTTP 请求和后续重试，不会等到 `requestTimeoutMs` 才返回。取消以 `signal.reason` 原样抛出，不包装成 `A2AError`，因此不会被当作可重试的传输失败而重发消息。
+取消会同时中断进行中的 HTTP 请求、发现、认证和后续重试，不会等到 `requestTimeoutMs` 才返回。取消以 `signal.reason` 原样抛出，不包装成 `A2AError`，因此不会被当作可重试的传输失败而重发消息。
 
-自定义 `ClientTransport` 实现可以通过 `send()` 的第三个可选参数 `signal` 感知取消；不接收该参数的实现仍然满足接口，只是无法中断进行中的尝试。
+`connect()` 同样接受 `signal`：
+
+```ts
+await client.connect({ signal: controller.signal });
+```
+
+自定义 `ClientTransport` 实现可以通过四个方法的可选 `signal` 参数感知取消；不接收该参数的实现仍然满足接口，只是无法中断进行中的尝试。
 
 ## 8. 时间参数如何配合
 

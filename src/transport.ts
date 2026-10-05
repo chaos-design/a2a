@@ -179,26 +179,40 @@ export class HttpTransport implements ClientTransport {
     this.maxResponseBytes = options.maxResponseBytes ?? 2_097_152;
   }
 
-  discover(): Promise<AgentCard> {
-    return this.call<AgentCard>("/.well-known/a2a-agent.json", {
-      method: "GET",
-    });
+  discover(signal?: AbortSignal): Promise<AgentCard> {
+    return this.call<AgentCard>(
+      "/.well-known/a2a-agent.json",
+      { method: "GET" },
+      signal,
+    );
   }
 
-  requestChallenge(request: ChallengeRequest): Promise<Challenge> {
-    return this.call<Challenge>("/a2a/v1/auth/challenge", {
-      method: "POST",
-      body: JSON.stringify(request),
-    });
+  requestChallenge(
+    request: ChallengeRequest,
+    signal?: AbortSignal,
+  ): Promise<Challenge> {
+    return this.call<Challenge>(
+      "/a2a/v1/auth/challenge",
+      {
+        method: "POST",
+        body: JSON.stringify(request),
+      },
+      signal,
+    );
   }
 
   verifyChallenge(
     verification: ChallengeVerification,
+    signal?: AbortSignal,
   ): Promise<SessionGrant> {
-    return this.call<SessionGrant>("/a2a/v1/auth/verify", {
-      method: "POST",
-      body: JSON.stringify(verification),
-    });
+    return this.call<SessionGrant>(
+      "/a2a/v1/auth/verify",
+      {
+        method: "POST",
+        body: JSON.stringify(verification),
+      },
+      signal,
+    );
   }
 
   send(
@@ -327,11 +341,20 @@ export class HttpTransport implements ClientTransport {
 export class InMemoryTransport implements ClientTransport {
   constructor(private readonly node: A2ANode) {}
 
-  async discover(): Promise<AgentCard> {
+  async discover(signal?: AbortSignal): Promise<AgentCard> {
+    if (signal?.aborted) {
+      throw signal.reason;
+    }
     return structuredClone(this.node.getAgentCard());
   }
 
-  async requestChallenge(request: ChallengeRequest): Promise<Challenge> {
+  async requestChallenge(
+    request: ChallengeRequest,
+    signal?: AbortSignal,
+  ): Promise<Challenge> {
+    if (signal?.aborted) {
+      throw signal.reason;
+    }
     const input: unknown = structuredClone(request);
     assertChallengeRequest(input);
     return structuredClone(this.node.issueChallenge(input));
@@ -339,7 +362,11 @@ export class InMemoryTransport implements ClientTransport {
 
   async verifyChallenge(
     verification: ChallengeVerification,
+    signal?: AbortSignal,
   ): Promise<SessionGrant> {
+    if (signal?.aborted) {
+      throw signal.reason;
+    }
     const input: unknown = structuredClone(verification);
     assertChallengeVerification(input);
     return structuredClone(this.node.verifyChallenge(input));
