@@ -69,12 +69,17 @@ export class A2ANode {
   readonly identity: SigningIdentity;
   readonly peers: PeerRegistry;
   readonly sessions: SessionManager;
+  /**
+   * Largest protocol message this node accepts, also advertised to peers in
+   * `limits.maxMessageBytes`. Transports use it as their default body cap so
+   * the advertised limit and the enforced limit cannot drift apart.
+   */
+  readonly maxMessageBytes: number;
 
   private readonly handlers = new Map<MessageKind, HandlerRegistration>();
   private readonly processed = new Map<string, CachedDelivery>();
   private readonly sequenceByConversation = new Map<string, number>();
   private readonly now: () => number;
-  private readonly maxMessageBytes: number;
   private readonly maxTtlMs: number;
   private readonly allowedClockSkewMs: number;
   private readonly maxProcessedMessages: number;

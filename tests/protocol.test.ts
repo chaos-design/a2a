@@ -740,6 +740,59 @@ test("a hard re-authentication failure still fails fast", async () => {
   assert.equal(transport.sends, 1);
 });
 
+test("the HTTP body cap honours the limit the agent advertises", async () => {
+  const serverIdentity = generateSigningIdentity("agent://coordinator");
+  const peers = new PeerRegistry();
+  const node = new A2ANode({
+    identity: serverIdentity,
+    peers,
+    name: "Coordinator",
+    endpoint: "http://127.0.0.1:4310",
+    maxMessageBytes: 4 * 1024 * 1024,
+  });
+
+  // No explicit maxRequestBytes: it must follow the advertised limit rather
+  // than silently reverting to an independent 1 MB default.
+  const server = createA2AHttpServer(node);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    assert.equal(node.getAgentCard().limits.maxMessageBytes, 4_194_304);
+
+    const accepted = await fetch(
+      `http://127.0.0.1:${address.port}/a2a/v1/auth/challenge`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pad: "x".repeat(2 * 1024 * 1024) }),
+      },
+    );
+    // 2 MB is inside the advertised limit, so it must not be rejected as too
+    // large. It fails later, on the missing peer, which is a different error.
+    assert.notEqual(accepted.status, 413);
+
+    const rejected = await fetch(
+      `http://127.0.0.1:${address.port}/a2a/v1/auth/challenge`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pad: "x".repeat(5 * 1024 * 1024) }),
+      },
+    );
+    assert.equal(rejected.status, 413);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+  }
+});
+
 test("an explicit maxRequestBytes may still tighten the body cap", async () => {
   const serverIdentity = generateSigningIdentity("agent://coordinator");
   const peers = new PeerRegistry();

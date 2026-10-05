@@ -230,6 +230,8 @@ const server = createA2AHttpServer(node, {
 server.listen(4310, "127.0.0.1");
 ```
 
+`maxRequestBytes` 默认取 `node.maxMessageBytes`，也就是 Agent Card 对外宣告的 `limits.maxMessageBytes`，因此对端按 Card 上限构造的消息不会被本节点以 413 拒绝。显式传入 `maxRequestBytes` 可以进一步收紧到与网关一致。
+
 生产环境可把服务挂在 TLS 反向代理后，或用相同路由实现原生 HTTPS。
 
 ### `InMemoryTransport`

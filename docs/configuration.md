@@ -361,7 +361,7 @@ const server = await provider.listen(node, {
 });
 ```
 
-`maxRequestBytes` 限制原始 HTTP 请求体，`A2A_MAX_MESSAGE_BYTES` 限制规范化后的协议消息。建议前者不大于网关限制，并与后者保持一致。
+`maxRequestBytes` 限制原始 HTTP 请求体，默认继承 `A2A_MAX_MESSAGE_BYTES`（即 Agent Card 宣告的 `limits.maxMessageBytes`），因此对端按 Card 上限构造的消息不会被拒绝。显式传入该值可以收紧到网关限制以下。建议取值不大于网关限制。
 
 ## 7. 客户端配置
 

@@ -100,7 +100,11 @@ export function createA2AHttpServer(
   node: A2ANode,
   options: HttpServerOptions = {},
 ): Server {
-  const maxRequestBytes = options.maxRequestBytes ?? 1_048_576;
+  // The raw request body is bounded by the same limit the node advertises in
+  // its Agent Card, so a peer that respects `limits.maxMessageBytes` is never
+  // rejected below what it was promised. An explicit `maxRequestBytes` may
+  // still tighten this to match a gateway limit.
+  const maxRequestBytes = options.maxRequestBytes ?? node.maxMessageBytes;
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://a2a.local");
