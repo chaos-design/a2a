@@ -342,6 +342,139 @@ test("a malformed acknowledgement yields a protocol error, not a TypeError", asy
   );
 });
 
+test("concurrent duplicates of one message invoke the handler once", async () => {
+  const { clientIdentity, node, serverIdentity } = createFixture();
+  let invocations = 0;
+  node.registerHandler(
+    "request",
+    async () => {
+      invocations += 1;
+      // Real handler latency keeps the copies overlapping, which is exactly the
+      // window in which the result cache alone cannot deduplicate.
+      await new Promise((release) => setTimeout(release, 25));
+      return { payload: { invocations } };
+    },
+    { requiredScopes: ["tasks:execute"] },
+  );
+
+  const challenge = node.issueChallenge({
+    agentId: clientIdentity.agentId,
+    keyId: clientIdentity.keyId,
+    requestedScopes: ["tasks:execute"],
+  });
+  const grant = node.verifyChallenge({
+    challengeId: challenge.challengeId,
+    signature: signChallenge(challenge, clientIdentity),
+  });
+  const signed = createSignedMessage(clientIdentity, {
+    kind: "request",
+    recipient: serverIdentity.agentId,
+    payload: { op: "charge" },
+    conversationId: "concurrent-1",
+  });
+
+  const bundles = await Promise.all(
+    Array.from({ length: 5 }, () =>
+      node.receive(structuredClone(signed), grant.token),
+    ),
+  );
+
+  assert.equal(invocations, 1, "the side effect must happen exactly once");
+  const statuses = bundles.map((bundle) => bundle.ack.payload.status);
+  assert.equal(statuses.filter((status) => status === "completed").length, 1);
+  assert.equal(statuses.filter((status) => status === "duplicate").length, 4);
+
+  // Every duplicate must observe the one real response, not an empty result.
+  for (const bundle of bundles) {
+    assert.deepEqual(bundle.messages[0]?.payload, { invocations: 1 });
+  }
+});
+
+test("a rejected handler still deduplicates for concurrent copies", async () => {
+  const { clientIdentity, node, serverIdentity } = createFixture();
+  let invocations = 0;
+  node.registerHandler(
+    "request",
+    async () => {
+      invocations += 1;
+      await new Promise((release) => setTimeout(release, 25));
+      throw new A2AError(ErrorCode.Conflict, "already applied", { status: 409 });
+    },
+    { requiredScopes: ["tasks:execute"] },
+  );
+
+  const challenge = node.issueChallenge({
+    agentId: clientIdentity.agentId,
+    keyId: clientIdentity.keyId,
+    requestedScopes: ["tasks:execute"],
+  });
+  const grant = node.verifyChallenge({
+    challengeId: challenge.challengeId,
+    signature: signChallenge(challenge, clientIdentity),
+  });
+  const signed = createSignedMessage(clientIdentity, {
+    kind: "request",
+    recipient: serverIdentity.agentId,
+    payload: { op: "charge" },
+  });
+
+  const bundles = await Promise.all(
+    Array.from({ length: 3 }, () =>
+      node.receive(structuredClone(signed), grant.token),
+    ),
+  );
+
+  assert.equal(invocations, 1);
+  assert.deepEqual(
+    bundles.map((bundle) => bundle.ack.payload.status),
+    ["rejected", "duplicate", "duplicate"],
+  );
+});
+
+test("distinct messages still run concurrently", async () => {
+  const { clientIdentity, node, serverIdentity } = createFixture();
+  let peak = 0;
+  let active = 0;
+  node.registerHandler(
+    "request",
+    async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((release) => setTimeout(release, 25));
+      active -= 1;
+      return { payload: { ok: true } };
+    },
+    { requiredScopes: ["tasks:execute"] },
+  );
+
+  const challenge = node.issueChallenge({
+    agentId: clientIdentity.agentId,
+    keyId: clientIdentity.keyId,
+    requestedScopes: ["tasks:execute"],
+  });
+  const grant = node.verifyChallenge({
+    challengeId: challenge.challengeId,
+    signature: signChallenge(challenge, clientIdentity),
+  });
+
+  const messages = ["a", "b", "c", "d"].map((id) =>
+    createSignedMessage(clientIdentity, {
+      kind: "request",
+      recipient: serverIdentity.agentId,
+      payload: { id },
+    }),
+  );
+  await Promise.all(
+    messages.map((message) =>
+      node.receive(structuredClone(message), grant.token),
+    ),
+  );
+
+  // The in-flight reservation is keyed per message, so it must not serialise
+  // unrelated work into a queue.
+  assert.equal(peak, 4);
+});
+
 test("delivery and conversation caches stay within their configured bounds", async () => {
   const { clientIdentity, node } = createFixture();
   node.registerHandler("request", () => ({ payload: { ok: true } }));

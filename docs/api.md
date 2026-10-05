@@ -157,6 +157,8 @@ const unregister = node.registerHandler(
 - `verifyChallenge(verification)`：验签并创建 Session。
 - `receive(message, bearerToken)`：执行完整接收管线并返回 `DeliveryBundle`。
 
+同一消息的并发副本只会触发一次处理器调用：接收方在进入处理器前先占用去重键，其余副本等待该次处理的结果并收到 `duplicate` ACK。去重键按 `sender + message.id` 划分，因此不同消息仍并行处理，互不排队。
+
 ## `A2AClient`
 
 客户端负责发现、认证、序号、签名、重试和响应验签。
