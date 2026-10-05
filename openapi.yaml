@@ -280,6 +280,7 @@ components:
             maxMessageBytes:
               type: integer
               minimum: 1
+              description: Largest protocol message this agent accepts, and by default also the raw HTTP request body bound, so a peer building a message within this limit is never rejected with 413. Operators may tighten the body bound separately via maxRequestBytes to match a gateway.
             maxTtlMs:
               type: integer
               minimum: 1
