@@ -358,19 +358,37 @@ components:
         kind:
           type: string
           maxLength: 255
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,254}$"
+          description: A built-in message kind, or a custom kind that begins with x-.
+          oneOf:
+            - enum:
+                - request
+                - response
+                - command
+                - event
+                - ack
+                - error
+                - state-delta
+                - state-snapshot
+            - pattern: "^x-"
         sender:
           type: string
           maxLength: 255
         recipient:
           type: string
           maxLength: 255
+          description: Target agent id, or * to address any agent.
         createdAt:
           type: string
           format: date-time
         ttlMs:
           type: integer
           minimum: 1
-          maximum: 300000
+          description: >-
+            Lifetime of the message. The ceiling is the receiving agent's
+            advertised limits.maxTtlMs, which defaults to 300000 but is
+            configurable per deployment, so it is not fixed here. Read the Agent
+            Card before choosing a value.
         sequence:
           type: integer
           minimum: 0
@@ -475,6 +493,101 @@ components:
           type: boolean
         details:
           $ref: "#/components/schemas/JsonValue"
+    VectorClock:
+      type: object
+      description: Per-agent logical counters; the value is a non-negative safe integer.
+      propertyNames:
+        minLength: 1
+      additionalProperties:
+        type: integer
+        minimum: 0
+    StateEntry:
+      type: object
+      additionalProperties: false
+      required:
+        - key
+        - value
+        - clock
+        - updatedAt
+        - updatedBy
+      properties:
+        key:
+          type: string
+          minLength: 1
+        value:
+          $ref: "#/components/schemas/JsonValue"
+        clock:
+          $ref: "#/components/schemas/VectorClock"
+        updatedAt:
+          type: string
+          format: date-time
+        updatedBy:
+          type: string
+          minLength: 1
+        tombstone:
+          type: boolean
+          description: Present and true when the key was deleted.
+    StateDelta:
+      type: object
+      additionalProperties: false
+      required:
+        - namespace
+        - baseClock
+        - clock
+        - changes
+      properties:
+        namespace:
+          type: string
+          minLength: 1
+        baseClock:
+          $ref: "#/components/schemas/VectorClock"
+        clock:
+          $ref: "#/components/schemas/VectorClock"
+        changes:
+          type: array
+          items:
+            $ref: "#/components/schemas/StateEntry"
+    StateSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - namespace
+        - clock
+        - entries
+      properties:
+        namespace:
+          type: string
+          minLength: 1
+        clock:
+          $ref: "#/components/schemas/VectorClock"
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/StateEntry"
+    StateSyncResult:
+      type: object
+      additionalProperties: false
+      required:
+        - namespace
+        - clock
+        - applied
+      description: >-
+        Response payload of the state-delta and state-snapshot handlers. The
+        nested delta is a self-contained StateDelta carrying everything the
+        sender is missing, so it can be passed to applyDelta unchanged; it is
+        kept separate from the counters rather than merged into the delta.
+      properties:
+        namespace:
+          type: string
+          minLength: 1
+        clock:
+          $ref: "#/components/schemas/VectorClock"
+        applied:
+          type: integer
+          minimum: 0
+          description: Number of entries accepted from the inbound document.
+        delta:
+          $ref: "#/components/schemas/StateDelta"
     DeliveryBundle:
       type: object
       additionalProperties: false
@@ -495,3 +608,28 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Message"
+    StateDeltaMessage:
+      allOf:
+        - $ref: "#/components/schemas/Message"
+        - type: object
+          properties:
+            kind:
+              const: state-delta
+            payload:
+              $ref: "#/components/schemas/StateDelta"
+    StateSnapshotMessage:
+      allOf:
+        - $ref: "#/components/schemas/Message"
+        - type: object
+          properties:
+            kind:
+              const: state-snapshot
+            payload:
+              $ref: "#/components/schemas/StateSnapshot"
+    StateSyncResultMessage:
+      allOf:
+        - $ref: "#/components/schemas/Message"
+        - type: object
+          properties:
+            payload:
+              $ref: "#/components/schemas/StateSyncResult"
